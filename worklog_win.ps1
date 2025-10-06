@@ -1,16 +1,12 @@
-#!/bin/zsh
-LOG_FILE="${HOME}/.worklog.csv"
-CURRENT_SESSION="${HOME}/.worklog_current"
+$LogFile = "$env:USERPROFILE\.worklog.csv"
+$CurrentSession = "$env:USERPROFILE\.worklog_current"
 
-# Initialize log file if it doesn't exist already
-if [[ ! -f "$LOG_FILE" ]]; then
-    echo "Date,Start,End,Duration,Task" > "$LOG_FILE"
-fi
+if (!(Test-Path $LogFile)) {
+    "Date,Start,End,Duration,Task" | Out-File -FilePath $LogFile -Encoding utf8
+}
 
-# Function to display the instructions for usage
-# If you dont like my ascii art you can delete it and paste your own in by editing this file
-usage() {
-    cat << EOF
+function Show-Usage {
+    @"
 Task Logger:
 
 Track the hours you spend working on things you find fun.
@@ -56,174 +52,177 @@ Usage:
   worklog report [days]             - Show last N days (default: 7)
   worklog edit                      - Open log file in default editor
 
-EOF
+"@
 }
 
-# Start a session
-start_session() {
-    if [[ -f "$CURRENT_SESSION" ]]; then
-        echo "⚠️  A work session is already active!"
-        echo "Use 'worklog stop' to end it first."
-        return 1
-    fi
+function Start-WorkSession {
+    param([string]$Task)
     
-    local task="$*"
-    if [[ -z "$task" ]]; then
-        task="Work session"
-    fi
-    
-    local start_time=$(date +%s)
-    echo "$start_time|$task" > "$CURRENT_SESSION"
-    echo "✅ Work session started at $(date +%H:%M)"
-    echo "📝 Task: $task"
-}
-
-# Stop current session
-stop_session() {
-    if [[ ! -f "$CURRENT_SESSION" ]]; then
-        echo "⚠️  No active work session found."
-        return 1
-    fi
-    
-    local session_data=$(<"$CURRENT_SESSION")
-    local start_time=$(echo "$session_data" | cut -d'|' -f1)
-    local task=$(echo "$session_data" | cut -d'|' -f2-)
-    local end_time=$(date +%s)
-    local duration=$((end_time - start_time))
-    
-    # Convert to hours and mins
-    local hours=$((duration / 3600))
-    local minutes=$(((duration % 3600) / 60))
-    local duration_str=$(printf "%d:%02d" $hours $minutes)
-    
-    # Log to the CSV file in home directory
-    local date_str=$(date -r $start_time +%Y-%m-%d)
-    local start_str=$(date -r $start_time +%H:%M)
-    local end_str=$(date +%H:%M)
-    
-    echo "$date_str,$start_str,$end_str,$duration_str,\"$task\"" >> "$LOG_FILE"
-    
-    rm "$CURRENT_SESSION"
-    
-    echo "⏹️  Work session stopped at $end_str"
-    echo "⏱️  Duration: $duration_str"
-    echo "📝 Task: $task"
-}
-
-# Add a task to current session
-add_task() {
-    if [[ ! -f "$CURRENT_SESSION" ]]; then
-        echo "⚠️  No active work session. Start one with 'worklog start'"
-        return 1
-    fi
-    
-    local new_task="$*"
-    if [[ -z "$new_task" ]]; then
-        echo "⚠️ Please provide a task description"
-        return 1
-    fi
-    
-    local session_data=$(<"$CURRENT_SESSION")
-    local start_time=$(echo "$session_data" | cut -d'|' -f1)
-    local old_task=$(echo "$session_data" | cut -d'|' -f2-)
-    
-    echo "$start_time|$old_task + $new_task" > "$CURRENT_SESSION"
-    echo "✅ Task added: $new_task"
-}
-
-# Show the current session status
-show_status() {
-    if [[ ! -f "$CURRENT_SESSION" ]]; then
-        echo "No active work session."
+    if (Test-Path $CurrentSession) {
+        Write-Host "⚠️  A work session is already active!" -ForegroundColor Yellow
+        Write-Host "Use 'worklog stop' to end it first."
         return
-    fi
+    }
     
-    local session_data=$(<"$CURRENT_SESSION")
-    local start_time=$(echo "$session_data" | cut -d'|' -f1)
-    local task=$(echo "$session_data" | cut -d'|' -f2-)
-    local current_time=$(date +%s)
-    local duration=$((current_time - start_time))
+    if ([string]::IsNullOrWhiteSpace($Task)) {
+        $Task = "Work session"
+    }
     
-    local hours=$((duration / 3600))
-    local minutes=$(((duration % 3600) / 60))
-    
-    echo "🟢 Active work session"
-    echo "Started: $(date -r $start_time +%H:%M)"
-    echo "Duration: ${hours}h ${minutes}m"
-    echo "Task: $task"
+    $StartTime = [int][double]::Parse((Get-Date -UFormat %s))
+    "$StartTime|$Task" | Out-File -FilePath $CurrentSession -Encoding utf8
+    Write-Host "✅ Work session started at $(Get-Date -Format HH:mm)"
+    Write-Host "📝 Task: $Task"
 }
 
-# Show a report for a date range specified
-show_report() {
-    local days=${1:-7}
-    local cutoff_date=$(date -v-${days}d +%Y-%m-%d)
+function Stop-WorkSession {
+    if (!(Test-Path $CurrentSession)) {
+        Write-Host "⚠️  No active work session found." -ForegroundColor Yellow
+        return
+    }
     
-    echo "Work Log Report (Last $days days)"
-    echo "=================================="
+    $SessionData = Get-Content $CurrentSession -Raw
+    $Parts = $SessionData -split '\|', 2
+    $StartTime = [int]$Parts[0]
+    $Task = $Parts[1].Trim()
     
-    tail -n +2 "$LOG_FILE" | while IFS=, read -r date start end duration task; do
-        if [[ "$date" > "$cutoff_date" ]] || [[ "$date" == "$cutoff_date" ]]; then
-            task=$(echo "$task" | sed 's/^"//;s/"$//')
-            printf "%s  %s-%s  %7s  %s\n" "$date" "$start" "$end" "$duration" "$task"
-        fi
-    done
+    $EndTime = [int][double]::Parse((Get-Date -UFormat %s))
+    $Duration = $EndTime - $StartTime
     
-    # Calculate total hours 
-    local total_minutes=0
-    tail -n +2 "$LOG_FILE" | while IFS=, read -r date start end duration task; do
-        if [[ "$date" > "$cutoff_date" ]] || [[ "$date" == "$cutoff_date" ]]; then
-            local h=$(echo "$duration" | cut -d: -f1)
-            local m=$(echo "$duration" | cut -d: -f2)
-            echo $((h * 60 + m))
-        fi
-    done | while read mins; do
-        total_minutes=$((total_minutes + mins))
-    done
-    	local total_minutes=0
-    tail -n +2 "$LOG_FILE" | while IFS=, read -r date start end duration task; do
-        if [[ "$date" > "$cutoff_date" ]] || [[ "$date" == "$cutoff_date" ]]; then
-            local h=$(echo "$duration" | cut -d: -f1)
-            local m=$(echo "$duration" | cut -d: -f2)
-            total_minutes=$((total_minutes + h * 60 + m))
-        fi
-    done
+    $Hours = [math]::Floor($Duration / 3600)
+    $Minutes = [math]::Floor(($Duration % 3600) / 60)
+    $DurationStr = "{0}:{1:D2}" -f $Hours, $Minutes
     
-    echo ""
-    echo "Total: $((total_minutes / 60))h $((total_minutes % 60))m"
+    $StartDate = (Get-Date "1970-01-01 00:00:00").AddSeconds($StartTime)
+    $DateStr = $StartDate.ToString("yyyy-MM-dd")
+    $StartStr = $StartDate.ToString("HH:mm")
+    $EndStr = (Get-Date).ToString("HH:mm")
+    
+    "$DateStr,$StartStr,$EndStr,$DurationStr,`"$Task`"" | Out-File -FilePath $LogFile -Append -Encoding utf8
+    
+    Remove-Item $CurrentSession
+    
+    Write-Host "⏹️  Work session stopped at $EndStr"
+    Write-Host "⏱️  Duration: $DurationStr"
+    Write-Host "📝 Task: $Task"
 }
 
-# Main commands 
-case "${1:-}" in
-    start|begin)
-        shift
-        start_session "$@"
-        ;;
-    stop|end)
-        stop_session
-        ;;
-    add)
-        shift
-        add_task "$@"
-        ;;
-    status)
-        show_status
-        ;;
-    today|day)
-        show_report 0
-        ;;
-    week)
-        show_report 7
-        ;;
-    month)
-        show_report 30
-        ;;
-    report)
-        show_report "${2:-7}"
-        ;;
-    edit)
-        ${EDITOR:-nvim} "$LOG_FILE"
-        ;;
-    *)
-        usage
-        ;;
-esac
+function Add-WorkTask {
+    param([string]$NewTask)
+    
+    if (!(Test-Path $CurrentSession)) {
+        Write-Host "⚠️  No active work session. Start one with 'worklog start'" -ForegroundColor Yellow
+        return
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($NewTask)) {
+        Write-Host "⚠️ Please provide a task description" -ForegroundColor Yellow
+        return
+    }
+    
+    $SessionData = Get-Content $CurrentSession -Raw
+    $Parts = $SessionData -split '\|', 2
+    $StartTime = $Parts[0]
+    $OldTask = $Parts[1].Trim()
+    
+    "$StartTime|$OldTask + $NewTask" | Out-File -FilePath $CurrentSession -Encoding utf8
+    Write-Host "✅ Task added: $NewTask"
+}
+
+function Show-WorkStatus {
+    if (!(Test-Path $CurrentSession)) {
+        Write-Host "No active work session."
+        return
+    }
+    
+    $SessionData = Get-Content $CurrentSession -Raw
+    $Parts = $SessionData -split '\|', 2
+    $StartTime = [int]$Parts[0]
+    $Task = $Parts[1].Trim()
+    
+    $CurrentTime = [int][double]::Parse((Get-Date -UFormat %s))
+    $Duration = $CurrentTime - $StartTime
+    
+    $Hours = [math]::Floor($Duration / 3600)
+    $Minutes = [math]::Floor(($Duration % 3600) / 60)
+    
+    $StartDate = (Get-Date "1970-01-01 00:00:00").AddSeconds($StartTime)
+    
+    Write-Host "🟢 Active work session"
+    Write-Host "Started: $($StartDate.ToString('HH:mm'))"
+    Write-Host "Duration: ${Hours}h ${Minutes}m"
+    Write-Host "Task: $Task"
+}
+
+function Show-WorkReport {
+    param([int]$Days = 7)
+    
+    $CutoffDate = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-dd")
+    
+    Write-Host "Work Log Report (Last $Days days)"
+    Write-Host "=================================="
+    
+    $TotalMinutes = 0
+    
+    Get-Content $LogFile | Select-Object -Skip 1 | ForEach-Object {
+        $Line = $_ -split ',(?=(?:[^"]*"[^"]*")*[^"]*$)'
+        $Date = $Line[0]
+        
+        if ($Date -ge $CutoffDate) {
+            $Start = $Line[1]
+            $End = $Line[2]
+            $Duration = $Line[3]
+            $Task = $Line[4] -replace '^"|"$', ''
+            
+            Write-Host ("{0}  {1}-{2}  {3,7}  {4}" -f $Date, $Start, $End, $Duration, $Task)
+            
+            $DurParts = $Duration -split ':'
+            $H = [int]$DurParts[0]
+            $M = [int]$DurParts[1]
+            $TotalMinutes += ($H * 60 + $M)
+        }
+    }
+    
+    $TotalHours = [math]::Floor($TotalMinutes / 60)
+    $TotalMins = $TotalMinutes % 60
+    
+    Write-Host ""
+    Write-Host "Total: ${TotalHours}h ${TotalMins}m"
+}
+
+$Command = $args[0]
+$RestArgs = $args[1..($args.Length - 1)] -join ' '
+
+switch ($Command) {
+    { $_ -in 'start', 'begin' } {
+        Start-WorkSession -Task $RestArgs
+    }
+    { $_ -in 'stop', 'end' } {
+        Stop-WorkSession
+    }
+    'add' {
+        Add-WorkTask -NewTask $RestArgs
+    }
+    'status' {
+        Show-WorkStatus
+    }
+    { $_ -in 'today', 'day' } {
+        Show-WorkReport -Days 0
+    }
+    'week' {
+        Show-WorkReport -Days 7
+    }
+    'month' {
+        Show-WorkReport -Days 30
+    }
+    'report' {
+        $ReportDays = if ($args[1]) { [int]$args[1] } else { 7 }
+        Show-WorkReport -Days $ReportDays
+    }
+    'edit' {
+        $Editor = if ($env:EDITOR) { $env:EDITOR } else { 'notepad' }
+        & $Editor $LogFile
+    }
+    default {
+        Show-Usage
+    }
+}
