@@ -2,13 +2,14 @@
 LOG_FILE="${HOME}/.worklog.csv"
 CURRENT_SESSION="${HOME}/.worklog_current"
 
-# Initialize log file if it doesn't exist already
+# Initialize the log file if it doesn't exist already
 if [[ ! -f "$LOG_FILE" ]]; then
     echo "Date,Start,End,Duration,Task" > "$LOG_FILE"
 fi
 
 # Function to display the instructions for usage
 # If you dont like my ascii art you can delete it and paste your own in by editing this file
+
 usage() {
     cat << EOF
 Task Logger:
