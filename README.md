@@ -4,6 +4,7 @@
 ### Mac
 - Download or copy and paste the .sh file
 - chmod +x ~/worklog
+
 **Create bin directory if it doesn't exist**
 - mkdir -p ~/bin
 
