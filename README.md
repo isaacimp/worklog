@@ -21,5 +21,6 @@
 - source ~/.zshrc
 
 **Test the program:**
-*The the bin directory type:*
+
+*In the bin directory type:*
 - worklog
