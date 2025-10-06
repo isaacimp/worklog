@@ -120,7 +120,7 @@ add_task() {
     
     local new_task="$*"
     if [[ -z "$new_task" ]]; then
-        echo "⚠️  Please provide a task description"
+        echo "⚠️ Please provide a task description"
         return 1
     fi
     
