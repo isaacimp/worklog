@@ -1,7 +1,7 @@
 # Work Hours Logger
-## A zsh script for tracking hours and tasks on Mac and Linux
+## A zsh script for tracking hours and tasks on Mac
 
-### Mac and Linux
+### Mac
 - Download or copy and paste the .sh file
 - chmod +x ~/worklog
 **Create bin directory if it doesn't exist**
