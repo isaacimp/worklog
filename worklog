@@ -5,15 +5,52 @@ SCRIPT_PATH="${0:A}"
 LOG_FILE="${HOME}/.worklog.csv"
 CURRENT_SESSION="${HOME}/.worklog_current"
 CONFIG_FILE="${HOME}/.worklog_config"
+TEMPLATES_FILE="${HOME}/.worklog_templates"
+NOTES_FILE="${HOME}/.worklog_notes"
 
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
 	echo "ascii_art=Snoopy" > "$CONFIG_FILE"
 fi
 
-# Initialize the log file if it doesn't exist already
+# Initialize or migrate the log file format
 if [[ ! -f "$LOG_FILE" ]]; then
-    echo "Date,Start,End,Duration,Task" > "$LOG_FILE"
+    echo "StartDate,StartTime,EndDate,EndTime,Duration,Task,Tags" > "$LOG_FILE"
+else
+    # Check if we need to migrate from old format
+    local header=$(head -n 1 "$LOG_FILE")
+    if [[ "$header" == "Date,Start,End,Duration,Task" ]]; then
+        echo "🔄 Migrating log file to new format..."
+
+        # Create backup
+        cp "$LOG_FILE" "${LOG_FILE}.backup"
+
+        # Create new file with new header
+        echo "StartDate,StartTime,EndDate,EndTime,Duration,Task,Tags" > "${LOG_FILE}.new"
+
+        # Migrate data (assume same-day sessions for old entries)
+        tail -n +2 "$LOG_FILE" | while IFS=, read -r date start end duration task; do
+            echo "$date,$start,$date,$end,$duration,$task," >> "${LOG_FILE}.new"
+        done
+
+        # Replace old file
+        mv "${LOG_FILE}.new" "$LOG_FILE"
+        echo "✅ Migration complete. Backup saved as ${LOG_FILE}.backup"
+    elif [[ "$header" == "StartDate,StartTime,EndDate,EndTime,Duration,Task" ]]; then
+        echo "🔄 Adding tags column to log file..."
+
+        # Create backup
+        cp "$LOG_FILE" "${LOG_FILE}.backup"
+
+        # Add tags column to existing format
+        sed '1s/$/,Tags/' "$LOG_FILE" > "${LOG_FILE}.new"
+        sed -i.tmp '2,$s/$/,/' "${LOG_FILE}.new"
+        rm "${LOG_FILE}.new.tmp"
+
+        # Replace old file
+        mv "${LOG_FILE}.new" "$LOG_FILE"
+        echo "✅ Migration complete. Backup saved as ${LOG_FILE}.backup"
+    fi
 fi
 
 
@@ -27,10 +64,35 @@ Track the time you spend working on things you find fun.
 ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 
 Usage:
-  worklog start [task description]  - Start a new work session
-  worklog stop                      - Stop current work session
-  worklog add <task>                - Add task to current session
-  worklog status                    - Show current session status
+  worklog start [task] [--tags "tag1,tag2"]  - Start a new work session
+  worklog start template:name                 - Start session from template
+  worklog stop                                - Stop current session (with preview)
+  worklog add <task>                          - Add task to current session
+  worklog status                              - Show current session status
+  worklog remove                              - Remove current session (no logging)
+  worklog edit-session                        - Edit current session task description
+
+  Templates:
+  worklog template save <name> <desc> [tags]  - Save a session template
+  worklog template list                        - List saved templates
+  worklog template use <name>                  - Start session from template
+
+  Session Management:
+  worklog list [days]               - List recent logged sessions with IDs
+  worklog edit-logged <id>          - Edit a logged session by ID
+  worklog remove-logged <id>        - Remove a logged session by ID
+  worklog search <term> [--tag tag] [--days N] - Search sessions
+  worklog note <id> <note>          - Add note to a logged session
+  worklog notes <id>                - Show notes for a session
+
+  Quick Info:
+  worklog quick                     - Show today's summary + current session
+  worklog stats                     - Show detailed statistics
+
+  Export:
+  worklog export [--format csv|json|markdown] [--days N] [--tag tag]
+
+  Reports:
   worklog today                     - Show today's logged hours
   worklog week                      - Show this week's logged hours
   worklog month                     - Show this month's logged hours
@@ -444,16 +506,42 @@ start_session() {
         echo "Use 'worklog stop' to end it first."
         return 1
     fi
-    
-    local task="$*"
+
+    local task=""
+    local tags=""
+
+    # Parse arguments for --tags flag
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --tags)
+                tags="$2"
+                shift 2
+                ;;
+            template:*)
+                local template_name="${1#template:}"
+                use_template "$template_name"
+                return $?
+                ;;
+            *)
+                task="$task $1"
+                shift
+                ;;
+        esac
+    done
+
+    task=$(echo "$task" | sed 's/^ *//')  # Remove leading spaces
+
     if [[ -z "$task" ]]; then
         task="Work session"
     fi
-    
+
     local start_time=$(date +%s)
-    echo "$start_time|$task" > "$CURRENT_SESSION"
+    echo "$start_time|$task|$tags" > "$CURRENT_SESSION"
     echo "✅ Work session started at $(date +%H:%M)"
     echo "📝 Task: $task"
+    if [[ -n "$tags" ]]; then
+        echo "🏷️  Tags: $tags"
+    fi
 }
 
 # Stop current session
@@ -465,7 +553,8 @@ stop_session() {
     
     local session_data=$(<"$CURRENT_SESSION")
     local start_time=$(echo "$session_data" | cut -d'|' -f1)
-    local task=$(echo "$session_data" | cut -d'|' -f2-)
+    local task=$(echo "$session_data" | cut -d'|' -f2)
+    local tags=$(echo "$session_data" | cut -d'|' -f3)
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
     
@@ -473,19 +562,42 @@ stop_session() {
     local hours=$((duration / 3600))
     local minutes=$(((duration % 3600) / 60))
     local duration_str=$(printf "%d:%02d" $hours $minutes)
-    
-    # Log to the CSV file in home directory
-    local date_str=$(date -r $start_time +%Y-%m-%d)
+
+    # Log to the CSV file with separate start and end dates
+    local start_date=$(date -r $start_time +%Y-%m-%d)
     local start_str=$(date -r $start_time +%H:%M)
+    local end_date=$(date +%Y-%m-%d)
     local end_str=$(date +%H:%M)
-    
-    echo "$date_str,$start_str,$end_str,$duration_str,\"$task\"" >> "$LOG_FILE"
-    
-    rm "$CURRENT_SESSION"
-    
-    echo "⏹️  Work session stopped at $end_str"
-    echo "⏱️  Duration: $duration_str"
-    echo "📝 Task: $task"
+
+    # Session preview
+    echo ""
+    echo "📋 Session Preview:"
+    echo "   Start: $start_date $start_str"
+    echo "   End:   $end_date $end_str"
+    echo "   Duration: $duration_str"
+    echo "   Task: $task"
+    if [[ -n "$tags" ]]; then
+        echo "   Tags: $tags"
+    fi
+    echo ""
+    read -q "REPLY?Save this session? (y/n) "
+    echo ""
+
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        echo "$start_date,$start_str,$end_date,$end_str,$duration_str,\"$task\",\"$tags\"" >> "$LOG_FILE"
+        rm "$CURRENT_SESSION"
+
+        echo "✅ Session saved!"
+        echo "⏹️  Work session stopped at $end_str"
+        echo "⏱️  Duration: $duration_str"
+        echo "📝 Task: $task"
+        if [[ -n "$tags" ]]; then
+            echo "🏷️  Tags: $tags"
+        fi
+    else
+        rm "$CURRENT_SESSION"
+        echo "❌ Session discarded"
+    fi
 }
 
 # Add a task to current session
@@ -509,6 +621,742 @@ add_task() {
     echo "✅ Task added: $new_task"
 }
 
+
+remove_session() {
+    if [[ ! -f "$CURRENT_SESSION" ]]; then
+        echo "⚠️  No active work session found."
+        return 1
+    fi
+
+    local session_data=$(<"$CURRENT_SESSION")
+    local start_time=$(echo "$session_data" | cut -d'|' -f1)
+    local task=$(echo "$session_data" | cut -d'|' -f2-)
+    local current_time=$(date +%s)
+    local duration=$((current_time - start_time))
+
+    local hours=$((duration / 3600))
+    local minutes=$(((duration % 3600) / 60))
+
+    echo "🗑️  Current session details:"
+    echo "Started: $(date -r $start_time +%H:%M)"
+    echo "Duration: ${hours}h ${minutes}m"
+    echo "Task: $task"
+    echo ""
+    read -q "REPLY?Are you sure you want to remove this session? (y/n) "
+    echo ""
+
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        rm "$CURRENT_SESSION"
+        echo "✅ Session removed (not logged to history)"
+    else
+        echo "❌ Session removal cancelled"
+    fi
+}
+
+# Template management functions
+save_template() {
+    local template_name="$1"
+    local description="$2"
+    local tags="$3"
+
+    if [[ -z "$template_name" ]] || [[ -z "$description" ]]; then
+        echo "Usage: worklog template save <name> <description> [tags]"
+        echo "Example: worklog template save coding 'React development work' 'frontend,react'"
+        return 1
+    fi
+
+    # Initialize templates file if it doesn't exist
+    if [[ ! -f "$TEMPLATES_FILE" ]]; then
+        echo "name,description,tags" > "$TEMPLATES_FILE"
+    fi
+
+    # Check if template already exists
+    if grep -q "^$template_name," "$TEMPLATES_FILE" 2>/dev/null; then
+        echo "⚠️  Template '$template_name' already exists. Use 'worklog template update' to modify it."
+        return 1
+    fi
+
+    echo "$template_name,$description,$tags" >> "$TEMPLATES_FILE"
+    echo "✅ Template '$template_name' saved"
+}
+
+list_templates() {
+    if [[ ! -f "$TEMPLATES_FILE" ]] || [[ $(wc -l < "$TEMPLATES_FILE") -le 1 ]]; then
+        echo "No templates saved yet."
+        echo "Create one with: worklog template save <name> <description> [tags]"
+        return
+    fi
+
+    echo "Saved Templates:"
+    echo "==============="
+    echo "Name        Description                    Tags"
+    echo "----------- ------------------------------ ----"
+
+    tail -n +2 "$TEMPLATES_FILE" | while IFS=, read -r name desc tags; do
+        printf "%-11s %-30s %s\n" "$name" "$desc" "$tags"
+    done
+}
+
+use_template() {
+    local template_name="$1"
+
+    if [[ -z "$template_name" ]]; then
+        echo "Usage: worklog template use <name>"
+        list_templates
+        return 1
+    fi
+
+    if [[ ! -f "$TEMPLATES_FILE" ]]; then
+        echo "⚠️  No templates found."
+        return 1
+    fi
+
+    local template_line=$(grep "^$template_name," "$TEMPLATES_FILE" 2>/dev/null)
+    if [[ -z "$template_line" ]]; then
+        echo "⚠️  Template '$template_name' not found."
+        list_templates
+        return 1
+    fi
+
+    local description=$(echo "$template_line" | cut -d',' -f2)
+    local tags=$(echo "$template_line" | cut -d',' -f3)
+
+    # Start session with template
+    if [[ -n "$tags" ]]; then
+        start_session "$description" --tags "$tags"
+    else
+        start_session "$description"
+    fi
+}
+
+# Search sessions
+search_sessions() {
+    local search_term="$1"
+    local since_date=""
+    local tag_filter=""
+    local days=""
+
+    # Parse options
+    shift
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --since)
+                since_date="$2"
+                shift 2
+                ;;
+            --tag)
+                tag_filter="$2"
+                shift 2
+                ;;
+            --days)
+                days="$2"
+                shift 2
+                ;;
+            *)
+                search_term="$search_term $1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$search_term" ]] && [[ -z "$tag_filter" ]]; then
+        echo "Usage: worklog search <term> [--since YYYY-MM-DD] [--tag tag] [--days N]"
+        echo "Examples:"
+        echo "  worklog search 'bug fix'"
+        echo "  worklog search react --tag frontend"
+        echo "  worklog search --tag urgent --days 30"
+        return 1
+    fi
+
+    # Set default cutoff if days specified
+    local cutoff_date=""
+    if [[ -n "$days" ]]; then
+        cutoff_date=$(date -v-${days}d +%Y-%m-%d 2>/dev/null || date -d "$days days ago" +%Y-%m-%d 2>/dev/null)
+    elif [[ -n "$since_date" ]]; then
+        cutoff_date="$since_date"
+    fi
+
+    echo "Search Results:"
+    echo "==============="
+    echo "ID  Start Date  Time      Duration  Task                           Tags"
+    echo "--- ----------  -----     --------  ------------------------------ ----"
+
+    local line_num=2
+    local found=0
+
+    tail -n +2 "$LOG_FILE" | while IFS=, read -r start_date start_time end_date end_time duration task tags; do
+        # Check date filter
+        if [[ -n "$cutoff_date" ]] && [[ "$start_date" < "$cutoff_date" ]]; then
+            ((line_num++))
+            continue
+        fi
+
+        # Clean up task and tags (remove quotes)
+        task=$(echo "$task" | sed 's/^"//;s/"$//')
+        tags=$(echo "$tags" | sed 's/^"//;s/"$//')
+
+        # Check search term
+        local matches_term=true
+        if [[ -n "$search_term" ]]; then
+            if ! echo "$task" | grep -qi "$search_term"; then
+                matches_term=false
+            fi
+        fi
+
+        # Check tag filter
+        local matches_tag=true
+        if [[ -n "$tag_filter" ]]; then
+            if ! echo "$tags" | grep -qi "$tag_filter"; then
+                matches_tag=false
+            fi
+        fi
+
+        if [[ "$matches_term" == true ]] && [[ "$matches_tag" == true ]]; then
+            printf "%3d %s  %s-%s  %7s  %-30s %s\n" "$line_num" "$start_date" "$start_time" "$end_time" "$duration" "$task" "$tags"
+            ((found++))
+        fi
+
+        ((line_num++))
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo "No sessions found matching your criteria."
+    fi
+}
+
+# Export functionality
+export_sessions() {
+    local format="csv"
+    local days="30"
+    local output_file=""
+    local tag_filter=""
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --format)
+                format="$2"
+                shift 2
+                ;;
+            --days)
+                days="$2"
+                shift 2
+                ;;
+            --output)
+                output_file="$2"
+                shift 2
+                ;;
+            --tag)
+                tag_filter="$2"
+                shift 2
+                ;;
+            *)
+                echo "Unknown option: $1"
+                return 1
+                ;;
+        esac
+    done
+
+    if [[ ! "$format" =~ ^(csv|json|markdown)$ ]]; then
+        echo "⚠️  Invalid format. Use: csv, json, or markdown"
+        return 1
+    fi
+
+    local cutoff_date=$(date -v-${days}d +%Y-%m-%d 2>/dev/null || date -d "$days days ago" +%Y-%m-%d 2>/dev/null)
+
+    # Set default output file if not specified
+    if [[ -z "$output_file" ]]; then
+        output_file="worklog_export_$(date +%Y%m%d).$format"
+    fi
+
+    case "$format" in
+        csv)
+            export_csv "$cutoff_date" "$output_file" "$tag_filter"
+            ;;
+        json)
+            export_json "$cutoff_date" "$output_file" "$tag_filter"
+            ;;
+        markdown)
+            export_markdown "$cutoff_date" "$output_file" "$tag_filter"
+            ;;
+    esac
+}
+
+export_csv() {
+    local cutoff_date="$1"
+    local output_file="$2"
+    local tag_filter="$3"
+
+    # Copy header
+    head -n 1 "$LOG_FILE" > "$output_file"
+
+    # Export filtered data
+    tail -n +2 "$LOG_FILE" | while IFS=, read -r start_date start_time end_date end_time duration task tags; do
+        if [[ "$start_date" > "$cutoff_date" ]] || [[ "$start_date" == "$cutoff_date" ]]; then
+            if [[ -z "$tag_filter" ]] || echo "$tags" | grep -qi "$tag_filter"; then
+                echo "$start_date,$start_time,$end_date,$end_time,$duration,$task,$tags" >> "$output_file"
+            fi
+        fi
+    done
+
+    echo "✅ CSV exported to: $output_file"
+}
+
+export_json() {
+    local cutoff_date="$1"
+    local output_file="$2"
+    local tag_filter="$3"
+
+    echo '{"sessions": [' > "$output_file"
+    local first=true
+
+    tail -n +2 "$LOG_FILE" | while IFS=, read -r start_date start_time end_date end_time duration task tags; do
+        if [[ "$start_date" > "$cutoff_date" ]] || [[ "$start_date" == "$cutoff_date" ]]; then
+            if [[ -z "$tag_filter" ]] || echo "$tags" | grep -qi "$tag_filter"; then
+                if [[ "$first" != true ]]; then
+                    echo "," >> "$output_file"
+                fi
+
+                # Clean up task and tags
+                task=$(echo "$task" | sed 's/^"//;s/"$//' | sed 's/"/\\"/g')
+                tags=$(echo "$tags" | sed 's/^"//;s/"$//' | sed 's/"/\\"/g')
+
+                {
+                    echo "  {"
+                    echo "    \"startDate\": \"$start_date\","
+                    echo "    \"startTime\": \"$start_time\","
+                    echo "    \"endDate\": \"$end_date\","
+                    echo "    \"endTime\": \"$end_time\","
+                    echo "    \"duration\": \"$duration\","
+                    echo "    \"task\": \"$task\","
+                    echo "    \"tags\": \"$tags\""
+                    echo "  }"
+                } >> "$output_file"
+                first=false
+            fi
+        fi
+    done
+
+    echo '' >> "$output_file"
+    echo ']}' >> "$output_file"
+    echo "✅ JSON exported to: $output_file"
+}
+
+export_markdown() {
+    local cutoff_date="$1"
+    local output_file="$2"
+    local tag_filter="$3"
+
+    {
+        echo "# Work Log Export"
+        echo ""
+        echo "Generated on: $(date +'%Y-%m-%d %H:%M:%S')"
+        echo ""
+        echo "| Start Date | Start Time | End Date | End Time | Duration | Task | Tags |"
+        echo "|------------|------------|----------|----------|----------|------|------|"
+    } > "$output_file"
+
+    tail -n +2 "$LOG_FILE" | while IFS=, read -r start_date start_time end_date end_time duration task tags; do
+        if [[ "$start_date" > "$cutoff_date" ]] || [[ "$start_date" == "$cutoff_date" ]]; then
+            if [[ -z "$tag_filter" ]] || echo "$tags" | grep -qi "$tag_filter"; then
+                # Clean up task and tags
+                task=$(echo "$task" | sed 's/^"//;s/"$//' | sed 's/|/\\|/g')
+                tags=$(echo "$tags" | sed 's/^"//;s/"$//' | sed 's/|/\\|/g')
+
+                echo "| $start_date | $start_time | $end_date | $end_time | $duration | $task | $tags |" >> "$output_file"
+            fi
+        fi
+    done
+
+    echo "✅ Markdown exported to: $output_file"
+}
+
+# Quick info commands
+quick_info() {
+    local today=$(date +%Y-%m-%d)
+    local total_minutes=0
+
+    echo "📊 Today's Work: $today"
+    echo "===================="
+
+    while IFS=, read -r start_date start_time end_date end_time duration task tags; do
+        if [[ "$start_date" == "$today" ]]; then
+            duration=$(echo "$duration" | tr -d '"' | tr -d ' ')
+            if [[ "$duration" =~ ^[0-9]+:[0-9]+$ ]]; then
+                local h=$(echo "$duration" | cut -d: -f1)
+                local m=$(echo "$duration" | cut -d: -f2)
+                if [[ "$h" =~ ^[0-9]+$ ]] && [[ "$m" =~ ^[0-9]+$ ]]; then
+                    total_minutes=$((total_minutes + h * 60 + m))
+                fi
+            fi
+        fi
+    done < <(tail -n +2 "$LOG_FILE" 2>/dev/null || echo "")
+
+    if (( total_minutes > 0 )); then
+        echo "⏱️  Total: $((total_minutes / 60))h $((total_minutes % 60))m"
+    else
+        echo "⏱️  No sessions logged today"
+    fi
+
+    # Show current session if active
+    if [[ -f "$CURRENT_SESSION" ]]; then
+        echo ""
+        echo "🟢 Current session:"
+        local session_data=$(<"$CURRENT_SESSION")
+        local start_time=$(echo "$session_data" | cut -d'|' -f1)
+        local task=$(echo "$session_data" | cut -d'|' -f2)
+        local current_time=$(date +%s)
+        local duration=$((current_time - start_time))
+        local hours=$((duration / 3600))
+        local minutes=$(((duration % 3600) / 60))
+
+        echo "   $(date -r $start_time +%H:%M) - now (${hours}h ${minutes}m)"
+        echo "   $task"
+    fi
+}
+
+show_stats() {
+    echo "📈 Work Statistics"
+    echo "=================="
+
+    # Calculate various stats
+    local total_sessions=0
+    local total_minutes=0
+    local day_minutes=()
+    local -A weekday_minutes
+
+    # Initialize weekday array
+    weekday_minutes[Monday]=0
+    weekday_minutes[Tuesday]=0
+    weekday_minutes[Wednesday]=0
+    weekday_minutes[Thursday]=0
+    weekday_minutes[Friday]=0
+    weekday_minutes[Saturday]=0
+    weekday_minutes[Sunday]=0
+
+    while IFS=, read -r start_date start_time end_date end_time duration task tags; do
+        ((total_sessions++))
+
+        # Calculate duration in minutes
+        duration=$(echo "$duration" | tr -d '"' | tr -d ' ')
+        if [[ "$duration" =~ ^[0-9]+:[0-9]+$ ]]; then
+            local h=$(echo "$duration" | cut -d: -f1)
+            local m=$(echo "$duration" | cut -d: -f2)
+            if [[ "$h" =~ ^[0-9]+$ ]] && [[ "$m" =~ ^[0-9]+$ ]]; then
+                local session_minutes=$((h * 60 + m))
+                total_minutes=$((total_minutes + session_minutes))
+
+                # Get weekday
+                local weekday=$(date -j -f "%Y-%m-%d" "$start_date" +%A 2>/dev/null || date -d "$start_date" +%A 2>/dev/null)
+                if [[ -n "$weekday" ]]; then
+                    weekday_minutes[$weekday]=$((weekday_minutes[$weekday] + session_minutes))
+                fi
+            fi
+        fi
+    done < <(tail -n +2 "$LOG_FILE" 2>/dev/null || echo "")
+
+    if (( total_sessions == 0 )); then
+        echo "No sessions found"
+        return
+    fi
+
+    echo "🔢 Total Sessions: $total_sessions"
+    echo "⏱️  Total Time: $((total_minutes / 60))h $((total_minutes % 60))m"
+    echo "📊 Average Session: $(( (total_minutes / total_sessions) / 60 ))h $(( (total_minutes / total_sessions) % 60 ))m"
+
+    echo ""
+    echo "📅 By Day of Week:"
+    for day in Monday Tuesday Wednesday Thursday Friday Saturday Sunday; do
+        local day_hours=$((weekday_minutes[$day] / 60))
+        local day_mins=$((weekday_minutes[$day] % 60))
+        printf "   %-9s %2dh %02dm\n" "$day:" "$day_hours" "$day_mins"
+    done
+}
+
+# Session notes functionality
+add_note() {
+    local session_id="$1"
+    local note_text="$2"
+
+    if [[ -z "$session_id" ]] || [[ -z "$note_text" ]]; then
+        echo "Usage: worklog note <session_id> <note_text>"
+        echo "Use 'worklog list' to see session IDs"
+        return 1
+    fi
+
+    if ! [[ "$session_id" =~ ^[0-9]+$ ]]; then
+        echo "⚠️  Session ID must be a number"
+        return 1
+    fi
+
+    # Check if session exists
+    local total_lines=$(wc -l < "$LOG_FILE")
+    if (( session_id < 2 || session_id > total_lines )); then
+        echo "⚠️  Invalid session ID. Use 'worklog list' to see valid IDs"
+        return 1
+    fi
+
+    # Initialize notes file if it doesn't exist
+    if [[ ! -f "$NOTES_FILE" ]]; then
+        echo "session_id,timestamp,note" > "$NOTES_FILE"
+    fi
+
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "$session_id,$timestamp,\"$note_text\"" >> "$NOTES_FILE"
+
+    echo "✅ Note added to session #$session_id"
+}
+
+show_notes() {
+    local session_id="$1"
+
+    if [[ -z "$session_id" ]]; then
+        echo "Usage: worklog notes <session_id>"
+        echo "Use 'worklog list' to see session IDs"
+        return 1
+    fi
+
+    if ! [[ "$session_id" =~ ^[0-9]+$ ]]; then
+        echo "⚠️  Session ID must be a number"
+        return 1
+    fi
+
+    if [[ ! -f "$NOTES_FILE" ]]; then
+        echo "No notes found for session #$session_id"
+        return
+    fi
+
+    # Show session details first
+    local session_line=$(sed -n "${session_id}p" "$LOG_FILE")
+    if [[ -n "$session_line" ]]; then
+        local start_date=$(echo "$session_line" | cut -d',' -f1)
+        local start_time=$(echo "$session_line" | cut -d',' -f2)
+        local end_date=$(echo "$session_line" | cut -d',' -f3)
+        local end_time=$(echo "$session_line" | cut -d',' -f4)
+        local duration=$(echo "$session_line" | cut -d',' -f5)
+        local task=$(echo "$session_line" | cut -d',' -f6- | sed 's/^"//;s/"$//')
+
+        echo "📝 Session #$session_id Notes:"
+        if [[ "$start_date" == "$end_date" ]]; then
+            echo "   Session: $start_date $start_time-$end_time ($duration)"
+        else
+            echo "   Session: $start_date $start_time to $end_date $end_time ($duration)"
+        fi
+        echo "   Task: $task"
+        echo ""
+    fi
+
+    # Show notes
+    local found_notes=false
+    tail -n +2 "$NOTES_FILE" | while IFS=, read -r note_session_id timestamp note; do
+        if [[ "$note_session_id" == "$session_id" ]]; then
+            note=$(echo "$note" | sed 's/^"//;s/"$//')
+            echo "💬 $timestamp: $note"
+            found_notes=true
+        fi
+    done
+
+    if [[ "$found_notes" != true ]]; then
+        echo "No notes found for session #$session_id"
+    fi
+}
+
+# Edit current session task
+edit_session() {
+    if [[ ! -f "$CURRENT_SESSION" ]]; then
+        echo "⚠️  No active work session found."
+        return 1
+    fi
+
+    local session_data=$(<"$CURRENT_SESSION")
+    local start_time=$(echo "$session_data" | cut -d'|' -f1)
+    local current_task=$(echo "$session_data" | cut -d'|' -f2-)
+
+    echo "📝 Current task: $current_task"
+    echo ""
+    read "new_task?Enter new task description: "
+
+    if [[ -z "$new_task" ]]; then
+        echo "❌ No changes made"
+        return 1
+    fi
+
+    echo "$start_time|$new_task" > "$CURRENT_SESSION"
+    echo "✅ Session task updated to: $new_task"
+}
+
+
+# List recent logged sessions with line numbers for editing/removal
+list_sessions() {
+    local days=${1:-7}
+    local cutoff_date=$(date -v-${days}d +%Y-%m-%d)
+
+    echo "Recent Sessions (Last $days days)"
+    echo "================================="
+    echo "ID  Start Date  Time      End Date    Time      Duration  Task"
+    echo "--- ----------  -----     ----------  -----     --------  ----"
+
+    local line_num=2  # Start from line 2 (skip header)
+    tail -n +2 "$LOG_FILE" | while IFS=, read -r start_date start_time end_date end_time duration task; do
+        if [[ "$start_date" > "$cutoff_date" ]] || [[ "$start_date" == "$cutoff_date" ]]; then
+            task=$(echo "$task" | sed 's/^"//;s/"$//')
+            # Show compact format if same day, expanded if different days
+            if [[ "$start_date" == "$end_date" ]]; then
+                printf "%3d %s  %s-%s    %7s  %s\n" "$line_num" "$start_date" "$start_time" "$end_time" "$duration" "$task"
+            else
+                printf "%3d %s  %s     %s  %s     %7s  %s\n" "$line_num" "$start_date" "$start_time" "$end_date" "$end_time" "$duration" "$task"
+            fi
+        fi
+        ((line_num++))
+    done
+}
+
+# Edit a logged session by line number
+edit_logged_session() {
+    local session_id="$1"
+
+    if [[ -z "$session_id" ]]; then
+        echo "Usage: worklog edit-logged <session_id>"
+        echo "Use 'worklog list' to see session IDs"
+        return 1
+    fi
+
+    if ! [[ "$session_id" =~ ^[0-9]+$ ]]; then
+        echo "⚠️  Session ID must be a number"
+        return 1
+    fi
+
+    # Check if line exists
+    local total_lines=$(wc -l < "$LOG_FILE")
+    if (( session_id < 2 || session_id > total_lines )); then
+        echo "⚠️  Invalid session ID. Use 'worklog list' to see valid IDs"
+        return 1
+    fi
+
+    # Get the current session data
+    local session_line=$(sed -n "${session_id}p" "$LOG_FILE")
+    local start_date=$(echo "$session_line" | cut -d',' -f1)
+    local start_time=$(echo "$session_line" | cut -d',' -f2)
+    local end_date=$(echo "$session_line" | cut -d',' -f3)
+    local end_time=$(echo "$session_line" | cut -d',' -f4)
+    local duration=$(echo "$session_line" | cut -d',' -f5)
+    local task=$(echo "$session_line" | cut -d',' -f6- | sed 's/^"//;s/"$//')
+
+    echo "📝 Editing session #$session_id:"
+    if [[ "$start_date" == "$end_date" ]]; then
+        echo "Current: $start_date $start_time-$end_time ($duration) - $task"
+    else
+        echo "Current: $start_date $start_time to $end_date $end_time ($duration) - $task"
+    fi
+    echo ""
+
+    # Get new values with better prompts
+    read "new_start_date?Start date (YYYY-MM-DD) [$start_date]: "
+    read "new_start_time?Start time (HH:MM) [$start_time]: "
+    read "new_end_date?End date (YYYY-MM-DD) [$end_date]: "
+    read "new_end_time?End time (HH:MM) [$end_time]: "
+    read "new_task?Task description [$task]: "
+
+    # Use existing values if nothing entered
+    new_start_date=${new_start_date:-$start_date}
+    new_start_time=${new_start_time:-$start_time}
+    new_end_date=${new_end_date:-$end_date}
+    new_end_time=${new_end_time:-$end_time}
+    new_task=${new_task:-$task}
+
+    # Validate date format
+    if ! [[ "$new_start_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || ! [[ "$new_end_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        echo "⚠️  Invalid date format. Use YYYY-MM-DD"
+        return 1
+    fi
+
+    # Validate time format
+    if ! [[ "$new_start_time" =~ ^[0-9]{1,2}:[0-9]{2}$ ]] || ! [[ "$new_end_time" =~ ^[0-9]{1,2}:[0-9]{2}$ ]]; then
+        echo "⚠️  Invalid time format. Use HH:MM"
+        return 1
+    fi
+
+    # Calculate duration considering date changes
+    local start_epoch=$(date -j -f "%Y-%m-%d %H:%M" "$new_start_date $new_start_time" +%s 2>/dev/null)
+    local end_epoch=$(date -j -f "%Y-%m-%d %H:%M" "$new_end_date $new_end_time" +%s 2>/dev/null)
+
+    if [[ -z "$start_epoch" ]] || [[ -z "$end_epoch" ]]; then
+        echo "⚠️  Invalid date/time combination"
+        return 1
+    fi
+
+    if (( end_epoch <= start_epoch )); then
+        echo "⚠️  End date/time must be after start date/time"
+        return 1
+    fi
+
+    local duration_seconds=$(( end_epoch - start_epoch ))
+    local duration_minutes=$(( duration_seconds / 60 ))
+    local new_duration=$(printf "%d:%02d" $((duration_minutes / 60)) $((duration_minutes % 60)))
+
+    # Create new session line
+    local new_line="$new_start_date,$new_start_time,$new_end_date,$new_end_time,$new_duration,\"$new_task\""
+
+    # Replace the line
+    sed -i.bak "${session_id}s/.*/$new_line/" "$LOG_FILE"
+
+    echo "✅ Session updated:"
+    if [[ "$new_start_date" == "$new_end_date" ]]; then
+        echo "   $new_start_date $new_start_time-$new_end_time ($new_duration) - $new_task"
+    else
+        echo "   $new_start_date $new_start_time to $new_end_date $new_end_time ($new_duration) - $new_task"
+    fi
+}
+
+# Remove a logged session by line number
+remove_logged_session() {
+    local session_id="$1"
+
+    if [[ -z "$session_id" ]]; then
+        echo "Usage: worklog remove-logged <session_id>"
+        echo "Use 'worklog list' to see session IDs"
+        return 1
+    fi
+
+    if ! [[ "$session_id" =~ ^[0-9]+$ ]]; then
+        echo "⚠️  Session ID must be a number"
+        return 1
+    fi
+
+    # Check if line exists
+    local total_lines=$(wc -l < "$LOG_FILE")
+    if (( session_id < 2 || session_id > total_lines )); then
+        echo "⚠️  Invalid session ID. Use 'worklog list' to see valid IDs"
+        return 1
+    fi
+
+    # Get the session data to show user
+    local session_line=$(sed -n "${session_id}p" "$LOG_FILE")
+    local start_date=$(echo "$session_line" | cut -d',' -f1)
+    local start_time=$(echo "$session_line" | cut -d',' -f2)
+    local end_date=$(echo "$session_line" | cut -d',' -f3)
+    local end_time=$(echo "$session_line" | cut -d',' -f4)
+    local duration=$(echo "$session_line" | cut -d',' -f5)
+    local task=$(echo "$session_line" | cut -d',' -f6- | sed 's/^"//;s/"$//')
+
+    echo "🗑️  Session to be removed:"
+    if [[ "$start_date" == "$end_date" ]]; then
+        echo "   #$session_id: $start_date $start_time-$end_time ($duration) - $task"
+    else
+        echo "   #$session_id: $start_date $start_time to $end_date $end_time ($duration) - $task"
+    fi
+    echo ""
+    read -q "REPLY?Are you sure you want to remove this session? (y/n) "
+    echo ""
+
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        sed -i.bak "${session_id}d" "$LOG_FILE"
+        echo "✅ Session removed from log"
+    else
+        echo "❌ Session removal cancelled"
+    fi
+}
+
 # Show the current session status
 show_status() {
     if [[ ! -f "$CURRENT_SESSION" ]]; then
@@ -524,7 +1372,7 @@ show_status() {
     
     local hours=$((duration / 3600))
     local minutes=$(((duration % 3600) / 60))
-    
+
     echo "🟢 Active work session"
     echo "Started: $(date -r $start_time +%H:%M)"
     echo "Duration: ${hours}h ${minutes}m"
@@ -538,23 +1386,34 @@ show_report() {
     
     echo "Work Log Report (Last $days days)"
     echo "=================================="
-    
-    tail -n +2 "$LOG_FILE" | while IFS=, read -r date start end duration task; do
-        if [[ "$date" > "$cutoff_date" ]] || [[ "$date" == "$cutoff_date" ]]; then
+
+    tail -n +2 "$LOG_FILE" | while IFS=, read -r start_date start_time end_date end_time duration task; do
+        if [[ "$start_date" > "$cutoff_date" ]] || [[ "$start_date" == "$cutoff_date" ]]; then
             task=$(echo "$task" | sed 's/^"//;s/"$//')
-            printf "%s  %s-%s  %7s  %s\n" "$date" "$start" "$end" "$duration" "$task"
+            if [[ "$start_date" == "$end_date" ]]; then
+                printf "%s  %s-%s  %7s  %s\n" "$start_date" "$start_time" "$end_time" "$duration" "$task"
+            else
+                printf "%s %s to %s %s  %7s  %s\n" "$start_date" "$start_time" "$end_date" "$end_time" "$duration" "$task"
+            fi
         fi
     done
-    
-    # Calculate total hours 
+
+    # Calculate total hours
     local total_minutes=0
-    while IFS=, read -r date start end duration task; do
-    if [[ "$date" > "$cutoff_date" ]] || [[ "$date" == "$cutoff_date" ]]; then
-        local h=$(echo "$duration" | cut -d: -f1)
-        local m=$(echo "$duration" | cut -d: -f2)
-        total_minutes=$((total_minutes + h * 60 + m))
-    fi
-done < <(tail -n +2 "$LOG_FILE")
+    while IFS=, read -r start_date start_time end_date end_time duration task; do
+        if [[ "$start_date" > "$cutoff_date" ]] || [[ "$start_date" == "$cutoff_date" ]]; then
+            # Clean duration and validate format
+            duration=$(echo "$duration" | tr -d '"' | tr -d ' ')
+            if [[ "$duration" =~ ^[0-9]+:[0-9]+$ ]]; then
+                local h=$(echo "$duration" | cut -d: -f1)
+                local m=$(echo "$duration" | cut -d: -f2)
+                # Validate that h and m are numbers
+                if [[ "$h" =~ ^[0-9]+$ ]] && [[ "$m" =~ ^[0-9]+$ ]]; then
+                    total_minutes=$((total_minutes + h * 60 + m))
+                fi
+            fi
+        fi
+    done < <(tail -n +2 "$LOG_FILE")
     echo ""
     echo "Total: $((total_minutes / 60))h $((total_minutes % 60))m"
 }
@@ -574,6 +1433,60 @@ case "${1:-}" in
         ;;
     status)
         show_status
+        ;;
+    remove|rm|delete)
+        remove_session
+        ;;
+    edit-session|edit-task)
+        edit_session
+        ;;
+    list|ls)
+        list_sessions "${2:-7}"
+        ;;
+    edit-logged)
+        edit_logged_session "$2"
+        ;;
+    remove-logged|rm-logged|delete-logged)
+        remove_logged_session "$2"
+        ;;
+    search)
+        shift
+        search_sessions "$@"
+        ;;
+    export)
+        shift
+        export_sessions "$@"
+        ;;
+    note)
+        add_note "$2" "$3"
+        ;;
+    notes)
+        show_notes "$2"
+        ;;
+    quick)
+        quick_info
+        ;;
+    stats)
+        show_stats
+        ;;
+    template)
+        case "${2:-}" in
+            save)
+                save_template "$3" "$4" "$5"
+                ;;
+            list)
+                list_templates
+                ;;
+            use)
+                use_template "$3"
+                ;;
+            *)
+                echo "Usage: worklog template <save|list|use>"
+                echo "  save <name> <description> [tags]"
+                echo "  list"
+                echo "  use <name>"
+                ;;
+        esac
         ;;
     today|day)
         show_report 0
