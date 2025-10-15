@@ -54,62 +54,134 @@ else
 fi
 
 
-# Function to display the instructions for usage
+# Show detailed help for specific topics
+show_help() {
+    local topic="$1"
+    
+    case "$topic" in
+        session|sessions)
+            cat << 'EOF'
+
+SESSION MANAGEMENT
+==================
+
+List & Search:
+  worklog list [days]                      List recent sessions (default: 7 days)
+  worklog search <term>                    Search by task description
+  worklog search <term> --tag <tag>        Search with tag filter
+  worklog search <term> --days <N>         Search within N days
+
+Edit & Remove:
+  worklog edit-logged <id>                 Edit a logged session
+  worklog remove-logged <id>               Delete a logged session
+
+Notes:
+  worklog note <id> "note text"            Add a note to a session
+  worklog notes <id>                       View all notes for a session
+
+Current Session:
+  worklog add "more details"               Append to current session
+  worklog edit-session                     Edit current session description
+  worklog remove                           Cancel current session (no log)
+
+EOF
+            ;;
+        template|templates)
+            cat << 'EOF'
+
+TEMPLATES
+=========
+
+Save time by creating templates for recurring tasks.
+
+  worklog template save <n> "<description>" [tags]
+  worklog template list
+  worklog template use <n>
+
+Examples:
+  worklog template save 1 "Daily standup meeting" "meetings"
+  worklog template save 2 "Code review" "development,review"
+  worklog start template:1
+
+EOF
+            ;;
+        report|reports)
+            cat << 'EOF'
+
+REPORTS & STATISTICS
+====================
+
+Quick Views:
+  worklog today                            Today's logged hours
+  worklog week                             This week's summary
+  worklog month                            This month's summary
+  worklog report [N]                       Last N days (default: 7)
+
+Detailed:
+  worklog quick                            Today + current session
+  worklog stats                            Detailed statistics
+
+Export:
+  worklog export --format csv              Export to CSV
+  worklog export --format json             Export to JSON
+  worklog export --format markdown         Export to Markdown
+  worklog export --format csv --days 30    Last 30 days
+  worklog export --tag development         Filter by tag
+
+EOF
+            ;;
+        *)
+            usage
+            ;;
+    esac
+}
+
+# Main usage display
 
 usage() {
     cat << EOF
 
+$(preview_ascii)
+
+WORK HOURS LOGGER
 Track the time you spend working on things you find fun.
 
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+COMMON COMMANDS
+===============
 
-Usage:
-  worklog start [task] [--tags "tag1,tag2"]  - Start a new work session
-  worklog start template:name                 - Start session from template
-  worklog stop                                - Stop current session (with preview)
-  worklog add <task>                          - Add task to current session
-  worklog status                              - Show current session status
-  worklog remove                              - Remove current session (no logging)
-  worklog edit-session                        - Edit current session task description
+Getting Started:
+  worklog start "task description"         Start tracking a session
+  worklog start "task" --tags "tag1,tag2"  Start with tags
+  worklog stop                             Stop and save current session
+  worklog status                           Check current session
 
-  Templates:
-  worklog template save <name> <desc> [tags]  - Save a session template
-  worklog template list                        - List saved templates
-  worklog template use <name>                  - Start session from template
+Quick Info:
+  worklog quick                            Today's summary + active session
+  worklog today                            Today's logged hours
+  worklog week                             This week's hours
+  worklog list                             Recent sessions
 
-  Session Management:
-  worklog list [days]               - List recent logged sessions with IDs
-  worklog edit-logged <id>          - Edit a logged session by ID
-  worklog remove-logged <id>        - Remove a logged session by ID
-  worklog search <term> [--tag tag] [--days N] - Search sessions
-  worklog note <id> <note>          - Add note to a logged session
-  worklog notes <id>                - Show notes for a session
+Managing Sessions:
+  worklog edit-logged <id>                 Edit a past session
+  worklog search "keyword"                 Search your sessions
 
-  Quick Info:
-  worklog quick                     - Show today's summary + current session
-  worklog stats                     - Show detailed statistics
+DETAILED HELP
+=============
 
-  Export:
-  worklog export [--format csv|json|markdown] [--days N] [--tag tag]
+  worklog help sessions                    Session management commands
+  worklog help templates                   Using templates
+  worklog help reports                     Reports & exports
 
-  Reports:
-  worklog today                     - Show today's logged hours
-  worklog week                      - Show this week's logged hours
-  worklog month                     - Show this month's logged hours
-  worklog report [days]             - Show last N days (default: 7)
-  worklog edit                      - Open log file in default editor
-  worklog alias <alias name>        - Change the command to use worklog
+OTHER
+=====
 
-  ASCII:
-  worklog ascii show		    - Shows all ascii options
-  worklog ascii set <option>	    - Change active ASCII art
-  worklog ascii preview <option>    - Preview an ASCII art
-  worklog ascii 		    - List ASCII and instructions	
-  
-$(preview_ascii)
+  worklog edit                             Open log file in editor
+  worklog ascii                            Change ASCII art
+  worklog alias <name>                     Create command alias
 
 EOF
 }
+
 
 ascii_frieren() {
 	cat << 'EOF'
@@ -1497,6 +1569,9 @@ case "${1:-}" in
     month)
         show_report 30
         ;;
+    help|--help|-h)
+	show_help "$2"
+	;;
     report)
         show_report "${2:-7}"
         ;;
